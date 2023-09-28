@@ -1,4 +1,13 @@
-class Card:
+from abc import ABC, abstractmethod
+
+
+class Card(ABC):
+    @abstractmethod
+    def __repr__(self):
+        pass
+
+
+class PlayingCard(Card):
     def __init__(self, suit, value):
         self.__suit = suit
         self.__value = value
@@ -13,12 +22,21 @@ class Card:
         return f"{self.__suit}{self.__value}"
 
 
-class PlayingCard(Card):
-    def __init__(self, suit, value):
-        super().__init__(suit, value)
-
-
 class TaskCards(Card):
-    def __init__(self, suit, value, player):
-        super().__init__(suit, value)
-        self.__player = player
+    def __init__(self, suit, value):
+        self.__suit = suit
+        self.__value = value
+        self.__player = None
+
+    def suit(self):
+        return self.__suit
+
+    def value(self):
+        return self.__value
+
+    def __repr__(self):
+        return f"{self.__suit}{self.__value}"
+
+
+class ReminderCards(Card):
+    pass

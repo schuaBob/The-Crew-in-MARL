@@ -21,10 +21,10 @@ class raw_env(AECEnv):
         self.playing_cards, self.task_cards = self.__generateAllCards()
 
     def config(self):
+        print(self.__config)
         print(self.possible_agents)
         print(self.playing_cards)
         print(self.task_cards)
-        print(self.__config)
 
     def __generateAllCards(self):
         playing_cards = []
@@ -33,7 +33,7 @@ class raw_env(AECEnv):
         for color in ["B", "P", "G", "Y"][: self.__config["colors"]]:
             for rank in range(1, self.__config["ranks"] + 1):
                 playing_cards.append(PlayingCard(color, rank))
-                task_cards.append(TaskCards(color, rank, None))
+                task_cards.append(TaskCards(color, rank))
         # Rocket Cards
         for value in range(1, self.__config["rockets"] + 1):
             playing_cards.append(PlayingCard("R", value))
