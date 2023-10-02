@@ -42,7 +42,7 @@ class raw_env(AECEnv):
         self.commander = -1
         start_idx = 0
         self.task_dict = {}
-        
+
         #count of cards in each suit for each player. Useful for checking legal plays
         self.suit_counts = [Counter() for _ in range(len(self.possible_agents))]
         for card in self.playing_cards:
@@ -57,6 +57,8 @@ class raw_env(AECEnv):
         if self.__config["rockets"] == 0:
             self.commander = random.randint(0, len(self.possible_agents) - 1)
 
+
+        # self.commander = 0
         start_idx = self.commander
         for _ in range(self.__config["tasks"]):
             task = self.task_cards.pop(0)
@@ -156,3 +158,5 @@ class raw_env(AECEnv):
         for value in range(1, self.__config["rockets"] + 1):
             playing_cards.append(("R", value))
         return playing_cards, task_cards
+
+
