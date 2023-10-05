@@ -1,15 +1,16 @@
 from pettingzoo import AECEnv
-
+from pettingzoo.utils import agent_selector
 import random
 from collections import Counter, deque
-from gymnasium.spaces import Discrete, Dict, Sequence
-from itertools import cycle
+from typing import Deque
 
+# from gymnasium.spaces import Discrete, Dict, Sequence
 
+# TODO: need to come up a better reward map, agents can be stupid and still get reward if win for the current reward_map
 REWARD_MAP = {
-    "win": 10,
+    "win": 50,
     "lose": -10,
-    "task_complete": 1,
+    "task_complete": 10,
 }
 
 
@@ -28,154 +29,160 @@ class raw_env(AECEnv):
         tasks: int = 3,
     ):
         self.__config = {
+            "seed": seed,
             "colors": colors,
             "ranks": ranks,
             "rockets": rockets,
             "players": players,
             "tasks": tasks,
         }
-        # assume play order is player_1 -> player_2 -> player_3 -> ... -> player_n -> player_1 ...
+
         self.possible_agents = [f"player_{i}" for i in range(self.__config["players"])]
-        self.num_agents = self.__config["players"]
-        self.playing_cards, self.task_cards = self.__generateAllCards()
-
-    def __createActionSpaces(self):
-        return {
-            agent: Dict(
-                {
-                    # no info, top, mid, bottom
-                    "token": Discrete(4),
-                    # every turn agent can play a card in hand
-                    "card": Discrete(len(self.hands[agent])),
-                }
-            )
-            for agent in self.possible_agents
-        }
-
-    # def __createObservationSpaces(self):
-    # return {agent: Dict({"hand": }) for agent in self.possible_agents}
+        self.__playing_cards, self.__tasks_cards = self.__generateAllCards()
 
     def reset(self, seed: int | None = None, options: dict | None = None) -> None:
         random.seed(seed)
-        random.shuffle(self.playing_cards)
-        random.shuffle(self.task_cards)
-        self.hands = {}
-        self.tasks = {}
-        self.suit_counters = {}
-        self.task_dict = {}
-        self.commander = None
+        self.agents = self.possible_agents[:]
+        self.rewards = {agent: 0 for agent in self.agents}
+        self.terminations = {agent: False for agent in self.agents}
+        self.__agent_selector = agent_selector(self.agents)
+        self.__hands: dict[str, list[tuple[str, int]]] = {}
+        self.__tasks: dict[str, list[tuple[str, int]]] = {}
+        self.__suit_counters: dict[str, Counter] = {}
+        self.__tasks_owner: dict[tuple[str, int], str] = {}
+        self.__current_trick: list[tuple[str, tuple[str, int]]] = []
 
-        for player in range(len(self.possible_agents)):
-            self.hands[player] = []
-            self.tasks[player] = []
-            # count of cards in each suit for each player. Useful for checking legal plays
-            self.suit_counters[player] = Counter()
+        for agent in range(len(self.agents)):
+            self.__hands[agent] = []
+            self.__tasks[agent] = []
+            self.__suit_counters[agent] = Counter()
+        self.__deal_playing_cards()
 
-        self.__dealPlayingCards()
-        self.__assignCommander()
-        self.__dealTaskCards()
-        for hand in self.hands:
-            hand.sort()
+        if self.__config["rockets"] == 0:
+            self.__reinit_agents_order(random.choice(self.agents))
+        else:
+            for agent in self.agents:
+                if ("R", self.__config["rockets"]) in self.__hands[agent]:
+                    self.__reinit_agents_order(agent)
+                    break
 
-        self.player_to_play = self.commander
-        self.current_trick: list[tuple[str, tuple[str, int]]] = []
+        self.__deal_task_cards()
+        for agent in self.agnets:
+            self.__hands[agent].sort()
+
+        self.agent_selection = self.__agent_selector.reset()
 
     # Perfect information function. All hands returned.
     # Will need to be updated to return only the hand of the current player, as well as belief distribution over the other hands (?).
     # Also, note that we'll need to track the previously played cards as well.
     def observe(self, agent):
+        return {"observation": None, "action_mask": None}
         return (
-            self.hands,
-            self.tasks,
-            self.current_trick,
+            self.__hands,
+            self.__tasks,
+            self.__current_trick,
             self.commander,
             self.suit_counts,
             self.player_to_play,
-            self.task_dict,
+            self.__tasks_owner,
         )
+
+    def __legal_moves(self):
+        """
+        Legal Moves:
+        1. if trick_basecard exist, play cards with color same as trick_basecard
+        2. if trick_basecard exist, play any card if player don't have cards with color same as the trick_basecard
+        3. if trick_basecard not exist(first player in turn), play any cards
+        """
+        # condition 2 or 3
+        if self.__agent_selector.is_first() or (
+            self.__suit_counters[self.agent_selection][
+                trick_basecard := self.__current_trick[0][1]
+            ]
+            == 0
+        ):
+            return [i for i in range(len(self.__hands[self.agent_selection]))]
+        # condition 1
+        else:
+            return [
+                i
+                for i in range(len(self.__hands[self.agent_selection]))
+                if self.__hands[self.agent_selection][i][0] == trick_basecard[0]
+            ]
 
     # for now, action is just the index of the card to play. Hints will be added later.
     # Return value is false if the game is over, true otherwise.
-    def step(self, action: int) -> int:
+    def step(self, action: int):
         """
-        action: index of card to play
-
-        Returns:
-            int: 1 if win, -1 if loss, 0 otherwise
+        action: index of card to play, provided after action_masking and ideally by custom Policy
         """
-        if action >= len(self.hands[self.agent_selection]):
-            raise ValueError(f"Invalid action, value {action} out of range.")
-
-        card = self.hands[self.agent_selection].pop(action)
-        self.suit_counters[self.agent_selection][card[0]] -= 1
-
-        # check if card playable in current trick
-        if len(self.current_trick) > 0:
-            if (
-                self.current_trick[0][1][0] != card[0]
-                and self.suit_counts[self.agent_selection][self.current_trick[0][1][0]]
-                > 0
-            ):
-                raise ValueError(
-                    f"Invalid action, card {card} not playable. Trick so far: {self.current_trick}"
-                )
-
-        self.current_trick.append((self.agent_selection, card))
+        self._clear_rewards()
+        card = self.__hands[self.agent_selection].pop(action)
+        self.__suit_counters[self.agent_selection][card[0]] -= 1
+        self.__current_trick.append((self.agent_selection, card))
 
         # check if trick is over
-        if len(self.current_trick) == len(self.possible_agents):
-            trick_suit = self.current_trick[0][1][0]
-            trick_value = self.current_trick[0][1][1]
-            winner = self.current_trick[0][0]
-            for player, card in self.current_trick:
-                if card[0] == trick_suit and card[1] > trick_value:
-                    trick_value = card[1]
-                    winner = player
-                elif card[0] == "R" and trick_suit != "R":
-                    trick_value = card[1]
+        if self.__agent_selector.is_last() and len(self.__current_trick) == len(
+            self.possible_agents
+        ):
+            trick_suit, trick_value = self.__current_trick[0][1]
+            trick_owner = self.__current_trick[0][0]
+            for card_player, (card_suit, card_value) in self.__current_trick[1:]:
+                if card_suit == trick_suit and card_value > trick_value:
+                    trick_value = card_value
+                    trick_owner = card_player
+                elif card_suit == "R" and trick_suit != "R":
                     trick_suit = "R"
-                    winner = player
+                    trick_value = card[1]
+                    trick_owner = card_player
 
-            # check tasks
-            for _, card in self.current_trick:
-                if card in self.task_dict:
-                    player = self.task_dict[card]
-                    if player == winner:
-                        self.tasks[player].remove(card)
-                        self.tasks[player].sort()
-                        self.task_dict.pop(card)
-                        # TODO: insert code to update reward positively.
-                        if sum(len(t) for t in self.tasks) == 0:
-                            return 1
+            # check if any task is completed
+            for _, card in self.__current_trick:
+                if card in self.__tasks_owner.keys():
+                    task_owner = self.__tasks_owner[card]
+                    if task_owner == trick_owner:
+                        self.__tasks[task_owner].remove(card)
+                        self.__tasks[task_owner].sort()
+                        self.__tasks_owner.pop(card)
+                        # currently only reward trick_owner(task_owner)
+                        self.rewards[trick_owner] += REWARD_MAP["task_complete"]
+                        # Terminate if all tasks are completed
+                        if len(self.__tasks_owner.keys()) == 0:
+                            for agent in self.agents:
+                                self.rewards[agent] += REWARD_MAP["win"]
+                                self.terminations[agent] = True
+                            break
                     else:
-                        # TODO: insert code to update reward negatively
-                        return -1
-            
-            self.agent_selection = winner
-            
-            self.current_trick = []
-        else:
-            self.player_to_play = (self.player_to_play + 1) % len(self.possible_agents)
-        return 0
+                        # currently only punish trick_owner(task_owner)
+                        self.rewards[trick_owner] += REWARD_MAP["lose"]
+                        # Terminate if task_owner != trick_owner
+                        for agent in self.agents:
+                            self.terminations[agent] = True
+                        break
+
+            self.__reinit_agents_order(trick_owner)
+            self.__current_trick = []
+        self._accumulate_rewards()
+        self.agent_selection = self.__agent_selector.next()
 
     def render(self):
         s = f"config: {self.__config} \n"
-        s += f"hands: {self.hands} \n"
-        s += f"tasks: {self.task_dict} \n"
+        s += f"hands: {self.__hands} \n"
+        s += f"tasks: {self.__tasks_owner} \n"
         s += f"commander: {self.commander}\n"
-        s += f"current_trick: {self.current_trick}\n"
+        s += f"current_trick: {self.__current_trick}\n"
         s += f"current_turn: {self.player_to_play}\n"
         return s
 
     def config(self):
         print(self.__config)
         print(self.possible_agents)
-        print(self.playing_cards)
-        print(self.task_cards)
+        print(self.__playing_cards)
+        print(self.__tasks_cards)
 
     def __generateAllCards(self):
-        playing_cards = []
-        task_cards = deque()
+        playing_cards: list[tuple[str, int]] = []
+        task_cards: Deque[tuple[str, int]] = deque()
         # Color Cards & Task Cards
         for suit in ["B", "P", "G", "Y"][: self.__config["colors"]]:
             for rank in range(1, self.__config["ranks"] + 1):
@@ -186,28 +193,22 @@ class raw_env(AECEnv):
             playing_cards.append(("R", value))
         return playing_cards, task_cards
 
-    def __dealPlayingCards(self):
-        player_cycle = cycle(self.possible_agents)
-        for card in self.playing_cards:
-            player = next(player_cycle)
-            self.hands[player].append(card)
-            self.suit_counters[player][card[0]] += 1
+    def __deal_playing_cards(self):
+        random.shuffle(self.__playing_cards)
+        for card in self.__playing_cards:
+            agent = self.__agent_selector.next()
+            self.__hands[agent].append(card)
+            self.__suit_counters[agent][card[0]] += 1
 
-    def __assignCommander(self):
-        if self.__config["rockets"] == 0:
-            self.commander = random.choice(self.possible_agents)
-        else:
-            for player in self.possible_agents:
-                if ("R", self.__config["rockets"]) in self.hands[player]:
-                    self.commander = player
-                    break
+    def __reinit_agents_order(self, start_agent):
+        self.agents.remove(start_agent)
+        self.agents.insert(0, start_agent)
+        self.__agent_selector.reinit(self.agents)
 
     # Random for now
-    def __dealTaskCards(self):
-        player_cycle = cycle(self.possible_agents)
-        for _ in range(self.possible_agents.index(self.commander)):
-            next(player_cycle)
+    def __deal_task_cards(self):
+        random.shuffle(self.__tasks_cards)
         for _ in range(self.__config["tasks"]):
-            player = next(player_cycle)
-            self.tasks[player].append(task := self.task_cards.pop(0))
-            self.task_dict[task] = player
+            agent = self.__agent_selector.next()
+            self.__tasks[agent].append(task := self.__tasks_cards.pop(0))
+            self.__tasks_owner[task] = agent
