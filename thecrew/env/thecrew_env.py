@@ -23,7 +23,7 @@ def env(**kwargs):
 class raw_env(AECEnv):
     def __init__(
         self,
-        seed: int,
+        render: bool,
         colors: int = 4,
         ranks: int = 9,
         rockets: int = 4,
@@ -31,7 +31,7 @@ class raw_env(AECEnv):
         tasks: int = 3,
     ):
         self.__config = {
-            "seed": seed,
+            "render":render,
             "colors": colors,
             "ranks": ranks,
             "rockets": rockets,
@@ -61,6 +61,7 @@ class raw_env(AECEnv):
         }
 
     def reset(self, seed: int | None = None, options: dict | None = None) -> None:
+        self.__config["seed"] = seed
         random.seed(seed)
         self.agents = self.possible_agents[:]
         self.rewards = {agent: 0 for agent in self.agents}
@@ -149,13 +150,12 @@ class raw_env(AECEnv):
         if (
             self.terminations[self.agent_selection]
             or self.truncations[self.agent_selection]
-            or action == None
         ):
-            print(f"step terminated at {self.agent_selectiont}")
-            return
+            return self._was_dead_step(action)
 
         self.__play_turn(self.agent_selection, action)
-
+        if self.__config["render"]:
+            self.render()
         # check if trick is over
         if self.__agent_selector.is_last() and len(self.__current_trick) == len(
             self.agents
@@ -168,7 +168,7 @@ class raw_env(AECEnv):
                     trick_owner = card_player
                 elif card_suit == "R" and trick_suit != "R":
                     trick_suit = "R"
-                    trick_value = card[1]
+                    trick_value = card_value
                     trick_owner = card_player
 
             # check if any task is completed
@@ -200,14 +200,13 @@ class raw_env(AECEnv):
         self.agent_selection = self.__agent_selector.next()
         self._accumulate_rewards()
 
-    # def render(self):
-    #     s = f"config: {self.__config} \n"
-    #     s += f"hands: {self.__hands} \n"
-    #     s += f"tasks: {self.__tasks_owner} \n"
-    #     s += f"commander: {self.commander}\n"
-    #     s += f"current_trick: {self.__current_trick}\n"
-    #     s += f"current_turn: {self.player_to_play}\n"
-    #     return s
+
+    def render(self):
+        if self.__agent_selector.is_first():
+            print("="*80)
+        print(f"current trick: {self.__current_trick}")
+        if self.__agent_selector.is_last():
+            print(f"current tasks: {self.__tasks_owner}")
 
     def config(self):
         print(self.__config)
