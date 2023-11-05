@@ -1,4 +1,5 @@
-from gymnasium.spaces import Space, Sequence, Discrete
+from gymnasium import spaces
+
 from pettingzoo import AECEnv
 from pettingzoo.utils import agent_selector
 import random
@@ -6,8 +7,6 @@ from collections import Counter, deque
 from typing import Deque
 from bidict import bidict
 import numpy as np
-
-# from gymnasium.spaces import Discrete, Dict, Sequence
 
 # TODO: need to come up a better reward map, agents can be stupid and still get reward if win for the current reward_map
 REWARD_MAP = {
@@ -42,15 +41,24 @@ class raw_env(AECEnv):
 
         self.possible_agents: list[str] = [f"player_{i}" for i in range(players)]
         self.__playing_cards, self.__tasks_cards = self.__generateAllCards()
-        self.action_spaces: dict[str, Space] = {
-            agent: Discrete(colors * ranks + rockets) for agent in self.possible_agents
-        }
-        # Discrete +1 becasue -1 indicates no cards played yet
-        self.observation_spaces: dict[str, Space] = {
-            agent: Sequence(Discrete(colors * ranks + rockets + 1, start=-1))
+        self.playing_cards_bidict = bidict(
+            {k: idx + 1 for idx, k in enumerate(self.__playing_cards)}
+        )
+        self.action_spaces: dict[str, spaces.Space] = {
+            agent: spaces.Discrete(colors * ranks + rockets, start=1)
             for agent in self.possible_agents
         }
-        print("Done init")
+        self.observation_spaces: dict[str, spaces.Space] = {
+            agent: spaces.Dict(
+                {
+                    "observation": spaces.Box(
+                        low=0, high=40, shape=(players,), dtype=np.int8
+                    ),
+                    "action_mask": spaces.MultiBinary(colors * ranks + rockets),
+                }
+            )
+            for agent in self.possible_agents
+        }
 
     def reset(self, seed: int | None = None, options: dict | None = None) -> None:
         random.seed(seed)
@@ -62,19 +70,16 @@ class raw_env(AECEnv):
         self._cumulative_rewards = {agent: 0 for agent in self.agents}
         self.__agent_selector = agent_selector(self.agents)
         self.__hands: dict[str, list[tuple[str, int]]] = {}
-        self.__tasks: dict[str, list[tuple[str, int]]] = {}
         self.__suit_counters: dict[str, Counter] = {}
+        self.__tasks: dict[str, list[tuple[str, int]]] = {}
         self.__tasks_owner: dict[tuple[str, int], str] = {}
         self.__current_trick: list[tuple[str, tuple[str, int]]] = []
-        self.__observations = {
-            agent: np.full((self.__config["players"],), -1, np.int8)
-            for agent in self.agents
-        }
 
         for agent in self.agents:
             self.__hands[agent] = []
-            self.__tasks[agent] = []
             self.__suit_counters[agent] = Counter()
+            self.__tasks[agent] = []
+
         self.__deal_playing_cards()
 
         if self.__config["rockets"] == 0:
@@ -89,66 +94,67 @@ class raw_env(AECEnv):
             self.__hands[agent].sort()
         self.agent_selection = self.__agent_selector.reset()
 
-    # Perfect information function. All hands returned.
-    # Will need to be updated to return only the hand of the current player, as well as belief distribution over the other hands (?).
-    # Also, note that we'll need to track the previously played cards as well.
     def observe(self, agent):
+        observation = np.array(
+            [self.playing_cards_bidict[card] for _, card in self.__current_trick],
+            dtype=np.int8,
+        )
+        action_mask = np.zeros(len(self.playing_cards_bidict), dtype=np.int8)
+        legal_moves = self.__legal_moves() if agent == self.agent_selection else []
+        for i in legal_moves:
+            action_mask[i] = 1
         return {
-            "observation": self.__observations[agent],
-            "action_mask": self.__legal_moves(agent),
+            "observation": observation,
+            "action_mask": action_mask,
         }
 
-    def __legal_moves(self, agent):
+    def __legal_moves(self):
         """
         Legal Moves of a agent:
         1. if trick_basecard exist, play cards with color same as trick_basecard
         2. if trick_basecard exist, play any card if player don't have cards with color same as the trick_basecard
         3. if trick_basecard not exist(first player in turn), play any cards
         """
-
-        mask = np.zeros(len(self.playing_cards_bidict), dtype=np.int8)
-        # condition 3
-        if self.__agent_selector.is_first() and agent == self.agent_selection:
-            for card in self.__hands[self.agent_selection]:
-                mask[self.playing_cards_bidict[card]] = 1
-            return mask
-        # condition 2
+        # condition 3 or 2
         if (
-            self.__suit_counters[agent][
+            self.__agent_selector.is_first()
+            or self.__suit_counters[self.agent_selection][
                 (trick_basecard := self.__current_trick[0][1])[0]
             ]
             == 0
         ):
-            for card in self.__hands[self.agent_selection]:
-                mask[self.playing_cards_bidict[card]] = 1
-            return mask
+            return [
+                self.playing_cards_bidict[card] - 1
+                for card in self.__hands[self.agent_selection]
+            ]
         # condition 1
-        elif self.__suit_counters[agent][trick_basecard[0]] > 0:
-            mask = []
-            for card in self.__hands[agent]:
-                if card[0] == trick_basecard[0]:
-                    mask[self.playing_cards_bidict[card]] = 1
-            return mask
+        if self.__suit_counters[self.agent_selection][trick_basecard[0]] > 0:
+            return [
+                self.playing_cards_bidict[card] - 1
+                for card in self.__hands[self.agent_selection]
+                if card[0] == trick_basecard[0]
+            ]
 
-    # for now, action is just the index of the card to play. Hints will be added later.
-    # Return value is false if the game is over, true otherwise.
+    def __play_turn(self, agent: str, action: int):
+        card = self.playing_cards_bidict.inverse[action]
+        self.__hands[agent].remove(card)
+        self.__suit_counters[agent][card[0]] -= 1
+        self.__current_trick.append((agent, card))
+
     def step(self, action: int):
         """
         action: index of card to play, provided after action_masking and ideally by custom Policy
         """
-        agent = self.agent_selection
-        card = self.playing_cards_bidict.inverse[action]
-        print(f"Current Action: {action}({card})")
         # truncation is used when num_step is set
-        if self.terminations[agent] or self.truncations[agent]:
-            print(f"step terminated at {agent}")
+        if (
+            self.terminations[self.agent_selection]
+            or self.truncations[self.agent_selection]
+            or action == None
+        ):
+            print(f"step terminated at {self.agent_selectiont}")
             return
-        self.__hands[agent].remove(card)
-        self.__suit_counters[agent][card[0]] -= 1
-        self.__current_trick.append((agent, card))
-        for i, trick_info in enumerate(self.__current_trick):
-            self.__observations[agent][i] = self.playing_cards_bidict[trick_info[1]]
-        self._cumulative_rewards[agent] = 0
+
+        self.__play_turn(self.agent_selection, action)
 
         # check if trick is over
         if self.__agent_selector.is_last() and len(self.__current_trick) == len(
@@ -166,49 +172,54 @@ class raw_env(AECEnv):
                     trick_owner = card_player
 
             # check if any task is completed
-            for _, card in self.__current_trick:
+            for card_player, card in self.__current_trick:
                 if card in self.__tasks_owner.keys():
-                    task_owner = self.__tasks_owner[card]
-                    if task_owner == trick_owner:
+                    if (task_owner := self.__tasks_owner[card]) == trick_owner:
                         self.__tasks[task_owner].remove(card)
                         self.__tasks[task_owner].sort()
                         self.__tasks_owner.pop(card)
                         # currently only reward trick_owner(task_owner)
-                        self.rewards[trick_owner] += REWARD_MAP["task_complete"]
+                        for agent in self.agents:
+                            self.rewards[agent] += REWARD_MAP["task_complete"]
                         # Terminate if all tasks are completed
-                        if len(self.__tasks_owner.keys()) == 0:
+                        if len(self.__tasks_owner) == 0:
                             for agent in self.agents:
                                 self.rewards[agent] += REWARD_MAP["win"]
                                 self.terminations[agent] = True
                             break
                     else:
-                        # currently only punish trick_owner(task_owner)
-                        self.rewards[trick_owner] += REWARD_MAP["lose"]
-                        # Terminate if task_owner != trick_owner
+                        # punish the card player of that task
+                        self.rewards[card_player] += REWARD_MAP["lose"]
                         for agent in self.agents:
                             self.terminations[agent] = True
                         break
 
             self.__reinit_agents_order(trick_owner)
             self.__current_trick = []
-
+        self._cumulative_rewards[self.agent_selection] = 0
         self.agent_selection = self.__agent_selector.next()
         self._accumulate_rewards()
 
-    def render(self):
-        s = f"config: {self.__config} \n"
-        s += f"hands: {self.__hands} \n"
-        s += f"tasks: {self.__tasks_owner} \n"
-        s += f"commander: {self.commander}\n"
-        s += f"current_trick: {self.__current_trick}\n"
-        s += f"current_turn: {self.player_to_play}\n"
-        return s
+    # def render(self):
+    #     s = f"config: {self.__config} \n"
+    #     s += f"hands: {self.__hands} \n"
+    #     s += f"tasks: {self.__tasks_owner} \n"
+    #     s += f"commander: {self.commander}\n"
+    #     s += f"current_trick: {self.__current_trick}\n"
+    #     s += f"current_turn: {self.player_to_play}\n"
+    #     return s
 
     def config(self):
         print(self.__config)
         print(self.possible_agents)
         print(self.__playing_cards)
         print(self.__tasks_cards)
+
+    def action_space(self, agent: str) -> spaces.Space:
+        return self.action_spaces[agent]
+
+    def observation_space(self, agent: str) -> spaces.Space:
+        return self.observation_spaces[agent]
 
     def __generateAllCards(self):
         playing_cards: list[tuple[str, int]] = []
@@ -221,14 +232,11 @@ class raw_env(AECEnv):
         # Rocket Cards
         for value in range(1, self.__config["rockets"] + 1):
             playing_cards.append(("R", value))
-        self.playing_cards_bidict = bidict(
-            {k: idx for idx, k in enumerate(playing_cards)}
-        )
-        self.task_cards_bidict = bidict({k: idx for idx, k in enumerate(task_cards)})
         return playing_cards, task_cards
 
     def __deal_playing_cards(self):
         random.shuffle(self.__playing_cards)
+        self.__agent_selector.reset()
         for card in self.__playing_cards:
             agent = self.__agent_selector.next()
             self.__hands[agent].append(card)
@@ -240,16 +248,10 @@ class raw_env(AECEnv):
         new_order = self.agents[idx:] + self.agents[0:idx]
         self.__agent_selector.reinit(new_order)
 
-    # Random for now
     def __deal_task_cards(self):
         random.shuffle(self.__tasks_cards)
+        self.__agent_selector.reset()
         for _ in range(self.__config["tasks"]):
             agent = self.__agent_selector.next()
             self.__tasks[agent].append(task := self.__tasks_cards.pop())
             self.__tasks_owner[task] = agent
-
-    def action_space(self, agent: str) -> Space:
-        return self.action_spaces[agent]
-
-    def observation_space(self, agent: str) -> Space:
-        return self.observation_spaces[agent]
