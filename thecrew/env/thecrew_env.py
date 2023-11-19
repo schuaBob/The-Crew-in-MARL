@@ -11,7 +11,7 @@ import numpy as np
 # TODO: need to come up a better reward map, agents can be stupid and still get reward if win for the current reward_map
 REWARD_MAP = {
     "win": 50,
-    "lose": -10,
+    "lose": -50,
     "task_complete": 10,
 }
 
@@ -38,7 +38,9 @@ class raw_env(AECEnv):
             "players": players,
             "tasks": tasks,
         }
-
+        self.metadata = {
+            "name": "The Crew"
+        }
         self.possible_agents: list[str] = [f"player_{i}" for i in range(players)]
         self.__playing_cards, self.__tasks_cards = self.__generateAllCards()
         self.playing_cards_bidict = bidict(
