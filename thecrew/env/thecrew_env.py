@@ -7,6 +7,9 @@ from collections import Counter, deque
 from typing import Deque
 from bidict import bidict
 import numpy as np
+import logging
+import os
+import time
 
 # TODO: need to come up a better reward map, agents can be stupid and still get reward if win for the current reward_map
 REWARD_MAP = {
@@ -31,16 +34,15 @@ class raw_env(AECEnv):
         tasks: int = 3,
     ):
         self.__config = {
-            "render":render,
+            "render": render,
             "colors": colors,
             "ranks": ranks,
             "rockets": rockets,
             "players": players,
             "tasks": tasks,
         }
-        self.metadata = {
-            "name": "The Crew"
-        }
+        self.__setLogger()
+        self.metadata = {"name": "The Crew"}
         self.possible_agents: list[str] = [f"player_{i}" for i in range(players)]
         self.__playing_cards, self.__tasks_cards = self.__generateAllCards()
         self.playing_cards_bidict = bidict(
@@ -77,6 +79,7 @@ class raw_env(AECEnv):
         self.__tasks: dict[str, list[tuple[str, int]]] = {}
         self.__tasks_owner: dict[tuple[str, int], str] = {}
         self.__current_trick: list[tuple[str, tuple[str, int]]] = []
+        self.__turn = 0
 
         for agent in self.agents:
             self.__hands[agent] = []
@@ -96,6 +99,8 @@ class raw_env(AECEnv):
         for agent in self.agents:
             self.__hands[agent].sort()
         self.agent_selection = self.__agent_selector.reset()
+        if self.__config["render"]:
+            self.config()
 
     def observe(self, agent):
         observation = np.array(
@@ -153,15 +158,14 @@ class raw_env(AECEnv):
             self.terminations[self.agent_selection]
             or self.truncations[self.agent_selection]
         ):
+            if self.__config["render"] and (reason := self.infos[self.agent_selection].get("terminate_reason")):
+                self.logger.info(f"Termination Cause: {reason}")
             return self._was_dead_step(action)
-
+        if self.__agent_selector.is_first():
+            self.__turn += 1
         self.__play_turn(self.agent_selection, action)
-        if self.__config["render"]:
-            self.render()
         # check if trick is over
-        if self.__agent_selector.is_last() and len(self.__current_trick) == len(
-            self.agents
-        ):
+        if self.__agent_selector.is_last():
             trick_suit, trick_value = self.__current_trick[0][1]
             trick_owner = self.__current_trick[0][0]
             for card_player, (card_suit, card_value) in self.__current_trick[1:]:
@@ -183,38 +187,54 @@ class raw_env(AECEnv):
                         # currently only reward trick_owner(task_owner)
                         for agent in self.agents:
                             self.rewards[agent] += REWARD_MAP["task_complete"]
-                        # Terminate if all tasks are completed
-                        if len(self.__tasks_owner) == 0:
-                            for agent in self.agents:
-                                self.rewards[agent] += REWARD_MAP["win"]
-                                self.terminations[agent] = True
-                            break
                     else:
+                        self.infos[self.agent_selection][
+                            "terminate_reason"
+                        ] = f"{task_owner} is unable to fulfill the task {card} due to {trick_owner}'s move of playing {(trick_suit, trick_value)}"
                         # punish the card player of that task
                         self.rewards[card_player] += REWARD_MAP["lose"]
                         for agent in self.agents:
                             self.terminations[agent] = True
                         break
-
+            if len(self.__tasks_owner) == 0:
+                self.infos[self.agent_selection][
+                    "terminate_reason"
+                ] = f"All tasks have completed."
+                for agent in self.agents:
+                    self.rewards[agent] += REWARD_MAP["win"]
+                    self.terminations[agent] = True
+        if self.__config["render"]:
+            self.render()
+        if self.__agent_selector.is_last():
             self.__reinit_agents_order(trick_owner)
             self.__current_trick = []
         self._cumulative_rewards[self.agent_selection] = 0
         self.agent_selection = self.__agent_selector.next()
         self._accumulate_rewards()
 
-
     def render(self):
         if self.__agent_selector.is_first():
-            print("="*80)
-        print(f"current trick: {self.__current_trick}")
+            self.logger.info("{:=^40}".format(f" Turn {self.__turn} "))
+        card = (
+            str(self.__current_trick[-1][1]) + " -> Task Card"
+            if self.__current_trick[-1][1] in self.__tasks_owner
+            else self.__current_trick[-1][1]
+        )
+        self.logger.info(f"{self.agent_selection} played {card}")
         if self.__agent_selector.is_last():
-            print(f"current tasks: {self.__tasks_owner}")
+            self.logger.info(f"Unfinished Tasks: {self.__tasks_owner}")
+            for agent in self.agents:
+                self.logger.info(f"{agent} Hand: {self.__hands[agent]}")
 
     def config(self):
-        print(self.__config)
-        print(self.possible_agents)
-        print(self.__playing_cards)
-        print(self.__tasks_cards)
+        self.logger.info("{:=^80}".format(f" Parameter Configs "))
+        self.logger.info(f"Configs:{self.__config}")
+        self.logger.info(f"Agents: {self.possible_agents}")
+        for agent in self.agents:
+            self.logger.info(f"{agent} Hand: {self.__hands[agent]}")
+        self.logger.info(
+            f"{self.__agent_selector.agent_order[0]} with ('R', 4) in hand will go first"
+        )
 
     def action_space(self, agent: str) -> spaces.Space:
         return self.action_spaces[agent]
@@ -256,3 +276,12 @@ class raw_env(AECEnv):
             agent = self.__agent_selector.next()
             self.__tasks[agent].append(task := self.__tasks_cards.pop())
             self.__tasks_owner[task] = agent
+
+    def __setLogger(self, name="TheCrew", level=logging.DEBUG):
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(level)
+        if not os.path.exists("logs"):
+            os.mkdir("logs")
+        file_handler = logging.FileHandler(f"logs/{name}-{int(time.time())}.log", mode="w")
+        file_handler.setLevel(level)
+        self.logger.addHandler(file_handler)
