@@ -6,6 +6,8 @@ name = "pypi"
 [packages]
 pettingzoo = "*"
 black = "*"
+bidict = "*"
+torch = "*"
 
 [dev-packages]
 
